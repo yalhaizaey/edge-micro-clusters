@@ -1,0 +1,469 @@
+#!/bin/bash
+##link local address to the config file
+source /Users/Yousef/Documents/configs/config.sh
+# create local variables of config variables - Make sure to UPDATE the location of the configs
+cloudaddress=$cloudaddress
+clouduser=$clouduser
+
+edgeaddress1=$edgeaddress1
+edgeaddress2=$edgeaddress2
+edgeaddress3=$edgeaddress3
+edgeaddress4=$edgeaddress4
+edgeaddress5=$edgeaddress5
+edgeaddress6=$edgeaddress6
+edgeaddress7=$edgeaddress7
+edgeaddress8=$edgeaddress8
+
+edgeuser1=$edgeuser1
+edgeuser2=$edgeuser2
+edgeuser3=$edgeuser3
+edgeuser4=$edgeuser4
+edgeuser5=$edgeuser5
+edgeuser6=$edgeuser6
+edgeuser7=$edgeuser7
+edgeuser8=$edgeuser8
+
+awskey=$awskey
+cloudpublicip=$cloudpublicip
+configslocation=/Users/Yousef/Documents/configs/*
+configfilelocation=/Users/Yousef/Documents/config.sh
+
+
+# create the various results file/filenames (data file, verbose data file, jmeter file, taurus file)
+function create_result_files {
+	verbose_filename=result
+	metrics_verbose_filename=metrics
+	jmeter_filename=jmeter
+	taurus_filename=taurus
+	filenumber=""
+	cd results
+	if [[ -e $verbose_filename.txt ]] ; then
+		i=0
+		while [[ -e $verbose_filename-$i.txt ]] ; do
+			let i++
+		done
+		filenumber=$i
+		verbose_filename=$verbose_filename-$i
+	fi
+	if [[ -e $metrics_verbose_filename.txt ]] ; then
+		i=0
+		while [[ -e $metrics_verbose_filename-$i.txt ]] ; do
+			let i++
+		done
+		filenumber=$i
+		metrics_verbose_filename=$metrics_verbose_filename-$i
+	fi
+	if [[ -e $jmeter_filename.csv ]] ; then
+		i=0
+		while [[ -e $jmeter_filename-$i.csv ]] ; do
+			let i++
+		done
+		filenumber=$i
+		jmeter_filename=$jmeter_filename-$i
+	fi
+	if [[ -e $taurus_filename.csv ]] ; then
+		i=0
+		while [[ -e $taurus_filename-$i.csv ]] ; do
+			let i++
+		done
+		filenumber=$i
+		taurus_filename=$taurus_filename-$i
+	fi
+	cd ../
+}
+
+function benchmark_edge_applications {
+    if 	 [ "$applications" == "-y" ]; then containerName="darknet$counter";   
+	elif [ "$applications" == "-p" ]; then containerName="psphinx$counter";  
+    elif [ "$applications" == "-j" ]; then containerName="aeneas$counter";  
+    fi
+
+    echo -e "ssh into edge instance for application benchmarks.."
+	ssh	$edgeuser@$edgeaddress ' sudo bash -s' -- < ./applications $environment $actions $applications $containerName	
+	echo -e "DONE - edge ssh session"
+	echo -e
+
+
+	# #wait for data to be generated ..!!
+	# echo "Waiting for 'DONE - edge ssh session'..."
+	# while ! "Done running Yolo"; do
+	# 	sleep 10
+	# done
+	# echo "Received 'DONE - edge ssh session'. Continuing..."
+	
+
+	local start=$(gdate +%s.%N)
+	local transfer_cloud=$(scp -v $edgeuser@$edgeaddress:~/defog/results/* ./ 2>&1 | grep "Transferred")
+	local newval=${transfer_cloud//[!0-9\\ \\.]/}
+	newarr1=(`echo ${newval}`);
+	local end=$(gdate +%s.%N)
+	local runtime=$( echo "$end - $start" | bc -l )
+	metricsValues[3]=$runtime
+	metricsValues[8]=${newarr1[1]}
+	metricsValues[11]=$(bc <<< "scale=10;${metricsValues[8]}/${metricsValues[3]}")
+
+	cat cloudresult.txt >> $verbose_filename.txt 2>/dev/null
+	#rm cloudresult.txt 2>/dev/null
+
+	read -a newarr < arrresult.txt
+	#rm arrresult.txt 2>/dev/null
+
+	echo -e Total bytes transferred from the edge: ${metricsValues[8]} bytes | tee -a $verbose_filename.txt
+	echo Transfer edge application results to edge device: completed in $runtime secs | tee -a $verbose_filename.txt
+	echo Transfer rate from the edge: ${metricsValues[11]} bytes per second | tee -a $verbose_filename.txt
+
+	set_returned_application_metrics
+
+	echo "" | tee -a $verbose_filename.txt
+
+}
+function calc_cloud_cost {
+	# initialise local variables: hourly cost of computation on AWS, convertor scalar value, cost per second and compute time.
+	local awshrcost=0.016
+	local convert=3600
+	local awsseccost=$(bc <<< "scale=10;$awshrcost/$convert") # scale=10 sets the number of decimal places to 10
+	local minruntime=60
+	local computetime=${metricsValues[1]}
+
+	# deterime the cost of running on AWS using the bc utility package
+	local cost=$(bc <<< "$computetime*$awsseccost")
+
+	# update the metric array
+	metricsValues[6]=$cost
+
+	# output the results to file and the terminal using tee
+	echo -e "Cloud cost for application computation (£0.016 per hour)": £$cost | tee -a $verbose_filename.txt
+
+}
+function calc_edge_cost {
+	# initialise the local variables - Estimated cost based upon AWS pricing strategy
+	local edgehrcost=0.008
+	local convert=3600
+	local edgeseccost=$(bc <<< "scale=10;$edgehrcost/$convert") # scale=10 sets the number of decimal places to 10
+	local computetime=${metricsValues[1]}
+
+	# deterime the cost of running on AWS using the bc utility package
+	local cost=$(bc <<< "$computetime*$edgeseccost")
+
+	# update the metric array
+	metricsValues[6]=$cost
+
+	# output the results to file and the terminal using tee
+	echo -e "Edge cost for application computation (estimated £0.008 per hour)": £$cost | tee -a $verbose_filename.txt
+}
+function calc_rtt {
+	local T1=${metricsValues[0]}
+	local E=${metricsValues[1]}
+	local T3=${metricsValues[3]}
+	if  [ "${metricsValues[13]}" == "NA" ];
+	then
+		local T4=0
+	else
+		local T4=${metricsValues[13]}
+	fi
+	local cl=$(bc <<< "$T1+$T3") # communication latency
+	local rtt=$(bc <<< "$T1+$T3+$E") # round trip time
+	local fcl=$(bc <<< "$T1+$T3+$T4") # communication latency
+	local frtt=$(bc <<< "$T1+$T3+$E+$T4") # round trip time
+
+	metricsValues[4]=$rtt # time to transfer data to and from cloud/edge as well as computation time
+	metricsValues[14]=$cl # time to transfer data to and from cloud/edge
+	metricsValues[15]=$frtt # time to transfer data to and from cloud/edge as well as computation time
+	metricsValues[16]=$fcl # time to transfer data to and from cloud/edge
+	echo -e Round Trip Time: $rtt secs | tee -a $verbose_filename.txt
+}
+
+function calc_rtf {
+	local computation=${newarr[1]}
+	local length=${newarr[5]}
+	local rtf=$(bc <<< "scale=10;$computation/$length")
+	metricsValues[5]=$rtf
+	echo Real Time Factor: $rtf secs | tee -a $verbose_filename.txt
+}
+
+#########################################################################################################################
+# iterate over metrics returned from the edge or cloud, set them to local array
+function set_returned_application_metrics {
+	local mets=${#metricsValues[@]}
+	local count=1
+	if [ "${newarr[10]}" != "NA" ];
+	then
+		metricsValues[13]=${newarr[10]} # set time taken to transfer data from the cloud to the edge
+	fi
+	for (( i=0; i<=$(( $mets -1 )); i++ ))
+	do
+		((count++))
+		if [ "${metricsValues[$i]}" == "NA" ] && [ "${newarr[$i]}" != "NA" ] && [ "${newarr[$i]}" ];
+		then
+			metricsValues[$i]=${newarr[$i]} # set retured data to local array
+		fi
+	done
+}
+################################################################################
+# utility function to update the current pipeline text based on the input sourced from the defog.sh script
+function set_pipeline {
+		# initialise to default value
+		pipeline="NA"
+		if [ "$environment" == "-e" ]; then pipeline="Edge-Only";
+		fi
+}
+################################################################################
+function benchmark_applications {
+		set_pipeline
+		if [ "$applications" == "-y" ];
+		then
+			echo YOLO Benchmarks: | tee -a $verbose_filename.txt
+			seperator
+			benchmark_fog_app "arrPics" "./assets/yolo-assets/yoloimage.jpg" "./assets/*.jpg" "YOLO"
+
+		elif [ "$applications" == "-p" ];
+		then
+			echo Pocket Sphinx Benchmarks: | tee -a $verbose_filename.txt
+			seperator
+			benchmark_fog_app "arrWavs" "./assets/psphinx-assets/psphinx.wav" "./assets/*.wav" "PocketSphinx"
+
+		elif [ "$applications" == "-j" ];
+		then
+			echo Aeneas Benchmarks: | tee -a $verbose_filename.txt
+			seperator
+			benchmark_aeneas
+		fi
+}
+
+################################################################################
+# determine the pipeline/platform to benchmark the applications on, invoke the calculation of real time trip and real time factor variables
+function benchmark_application {
+		echo -e
+		if [ "$environment" == "-e" ];
+		then
+      benchmark_edge_applications $counter
+      calc_rtt
+			if [ "${metricsValues[5]}" != "NA" ];
+			then
+				calc_rtf
+			fi
+			calc_edge_cost
+		fi
+		echo -e
+		echo -e "DeFog Metrics:"
+		echo -e ${metricsValues[@]} | tee -a $metrics_verbose_filename.txt
+}
+
+################################################################################
+# benchmark fog application - accepts asset array name, asset name, asset path and application name as parameters.
+function benchmark_fog_app {
+	# evaluate paramaters and initialise variables # benchmark_fog_app "arrPics" "./assets/yolo-assets/yoloimage.jpg" "./assets/yolo-assets/*.jpg" "YOLO"
+	eval array_name="$1"                           # arrPics
+	eval new_asset_name="$2"                       # ./assets/yolo-assets/yoloimage.jpg
+	eval asset_path="$3"                           # ./assets/yolo-assets/*.jpg
+	eval application_name="$4"                     # YOLO
+	create_metric_array
+	# Output to the terminal and results file using tee
+	echo -e "" | tee -a $verbose_filename.txt
+	echo $application_name Benchmark Run $counter: | tee -a $verbose_filename.txt
+	echo "" | tee -a $verbose_filename.txt
+
+  if [ "$applications" == "-y" ]; then newassetname="darknet$counter.jpg";
+	elif [ "$applications" == "-p" ]; then newassetname="psphinx$counter.wav";
+  fi
+	if [ "$environment" == "-c" ]; then metricsValues[19]=$cloudaddress;
+	elif [ "$environment" == "-e" ]; then metricsValues[19]=$edgeaddress;
+	fi
+	metricsValues[17]=$pipeline
+	metricsValues[18]=$application_name
+	metricsValues[21]=$newassetname
+
+	echo -e "Sending asset at path: " $asset "to application... on" $edgeaddress
+	scp_asset
+	echo -e "DONE - transferring asset payload to destination"
+
+  benchmark_application $counter
+}
+
+################################################################################
+function benchmark_aeneas {
+  if [ "$environment" == "-e" ]; then metricsValues[19]=$edgeaddress;
+  fi
+
+	multiassets="true"
+	create_metric_array
+
+	metricsValues[17]=$pipeline
+	metricsValues[18]="Aeneas"
+  if [ "$environment" == "-e" ]; then metricsValues[19]=$edgeaddress;
+  fi
+  metricsValues[21]="aeneas$counter"
+
+	echo -e "" | tee -a $verbose_filename.txt
+	echo Aeneas Benchmark Run $counter: | tee -a $verbose_filename.txt
+	echo "" | tee -a $verbose_filename.txt
+
+	newassetname="aeneas$counter.mp3"
+	echo -e "Sending asset at path: " $asset "to application... on" $edgeaddress
+	scp_asset
+	echo -e "DONE - transferring asset payload to destination"
+
+	local oldT1=${metricsValues[0]}
+	local oldbu1=${metricsValues[7]}
+
+	metricsValues[0]=$oldT1
+	metricsValues[7]=$oldbu1
+
+	asset=./aeneas-assets/$counter.xhtml
+	newassetname="aeneas$counter.xhtml"
+	echo -e "Sending asset at path: " $asset "to application... on" $edgeaddress
+	scp_asset
+	echo -e "DONE - transferring asset payload to destination"
+
+	benchmark_application $counter
+
+}
+
+################################################################################
+# instantiate or reset metric labels and values to default values
+function create_metric_array {
+	declare -g metricsLabels=('T1' 'ET' 'S3' 'T3' 'RTT' 'RTF' 'Cost' 'BytesUp1' 'BytesDown1' 'BytesDown2' 'BytesPerSecUp1' 'BytesPerSecDown1' 'BytesPerSecDown2' 'T4' 'CL' 'FRTT' 'FCL' 'Pipeline' 'Application' 'Device' 'EdgeNode' 'imageName')
+	declare -g metricsValues=('NA' 'NA' 'NA' 'NA' 'NA' 'NA' 'NA' 'NA' 'NA' 'NA' 'NA' 'NA' 'NA' 'NA' 'NA' 'NA' 'NA' 'NA' 'NA' 'NA' 'NA' 'NA')
+}
+
+################################################################################
+# secure copy/transfer data/assets to destination platform
+function scp_asset {
+	TIMEFORMAT=%R # set time format
+	cp $asset $newassetname       #copy sourcefile destinationfile
+	local start=$(gdate +%s.%N) # start timer to calculat ethe time it takes to transfer data
+	# transfer data to the edge and set array metrics to local variable
+	if [ "$environment" == "-e" ] || [ "$environment" == "-b" ]; # edge only or cloud/edge
+	then
+		local transfer_edge=$(scp -v $newassetname $edgeuser@$edgeaddress:~/defog/assets 2>&1 | grep "Transferred")
+		local newval=${transfer_edge//[!0-9\\ \\.]/}
+		newarr1=(`echo ${newval}`);
+	fi
+	# determine the time taken to transfer data
+	local end=$(gdate +%s.%N)
+	local runtime=$( echo "$end - $start" | bc -l )
+
+	# if running an application that sends multiple assets - sum the bytes sent and time taken to transfer the assets
+	if [ "$multiassets" == "true" ] && [ "${metricsValues[0]}" != "NA" ];
+	then
+		metricsValues[0]=$(bc <<< "${metricsValues[0]}+$runtime")
+		metricsValues[7]=$(bc <<< "${metricsValues[7]}+${newarr1[0]}")
+		local bytesUpVar=$(bc <<< "scale=10;${metricsValues[7]}/${metricsValues[0]}")
+		metricsValues[10]=$(bc <<< "$bytesUpVar")
+	else
+		metricsValues[0]=$runtime
+		metricsValues[7]=${newarr1[0]}
+		metricsValues[10]=$(bc <<< "scale=10;${metricsValues[7]}/${metricsValues[0]}")
+	fi
+	# remove duplicate asset
+	rm $newassetname 2>/dev/null
+}
+
+################################################################################
+# utility function to print verbose sepeartor/formatter line to file using tee
+function seperator {
+	echo -e "*****************************************************************************" | tee -a $verbose_filename.txt
+}
+(
+    export actions
+    export environment
+    export applications
+    export users
+    export ramp_up
+    export test_duration
+    export filenumber
+    export verbose_filename
+    export metrics_verbose_filename
+    export jmeter_filename
+    export taurus_filename
+    export cloudaddress
+    export clouduser
+    export edgeaddress
+    export edgeaddress1
+    export edgeaddress2
+    export edgeuser
+    export edgeuser1
+    export edgeuser2
+    export awskey
+    export cloudpublicip
+    export configslocation
+    export configfilelocation
+)
+
+################################################################################
+# To iterate in the solution obtained by the allocation methods
+declare -i device_counter=0
+function mapping {
+  edgeaddress=${new_edge_devices[$device_counter]}
+  edgeuser=$edgeuser1
+  device_counter=$((device_counter+1));
+ }
+################################################################################
+function main {
+	start_time_for_all_tasks=$(gdate +%s.%N)
+	create_result_files
+	create_metric_array
+	environment="-e";
+	echo -e "Edge Only Benchmarks: " | tee -a $verbose_filename.txt
+	seperator
+	echo "" | tee -a $verbose_filename.txt
+	echo ${metricsLabels[@]} >> $metrics_verbose_filename.txt
+
+	#python ./mip_linear_model.py
+	#allocationArray=$(cat ./mip_allocation.txt)
+	
+	#python ./pso_linear_model.py
+	allocationArray=$(cat ./pso_allocation.txt)
+	
+	#python ./pso_new.py ##with new m and c values...
+	#allocationArray=$(cat ./pso_allocation.txt)
+	
+	# python ./rand_allocation.py
+	# allocationArray=$(cat ./rand_allocation.txt)
+
+	counter=1
+	assets_folder=./assets/*
+	local num_files=$(ls -lR $assets_folder | wc -l)
+	echo "Number of tasks to be allocated=" $num_files "Tasks"
+	echo "Allocation decision=" $allocationArray
+	seperator
+	declare -a new_edge_devices=$allocationArray
+
+	for task in $assets_folder
+	do
+		array_name=("${assets_name[@]}" "$task")
+		asset=$array_name
+		filename=$(basename "$task")
+		task_type=${filename##*.}
+		if [ "$task_type" == "jpg" ];
+		then
+			applications="-y"
+		elif [ "$task_type" == "wav" ];
+		then
+			applications="-p"
+		elif [ "$task_type" == "mp3" ];
+		then
+			applications="-j"
+		fi
+		mapping ## Map ip addresses of nodes based on the allocation decision.
+		benchmark_applications & ## to fork multiple tasks
+		if (($counter%num_files==0));
+		#if (($counter%20==0));
+		then
+		wait
+		fi
+		((counter++))
+	done
+	# parase and format the captured metric data and output to a csv file. Using the correct naming convention variable. The output is redirected to remove unnecessary terminal output
+	cat $metrics_verbose_filename.txt | tr -s '[:blank:]' ',' > $metrics_verbose_filename.csv 2>/dev/null
+	# move the results files to the results output and redirect terminal std:: output
+	mv $verbose_filename.txt results/ 2>/dev/null
+	mv $metrics_verbose_filename.txt results/ 2>/dev/null
+	mv $metrics_verbose_filename.csv results/ 2>/dev/null
+	rm results.txt 2>/dev/null
+  	end_time_for_all_tasks=$(gdate +%s.%N)
+  	Time_to_run_all_tasks=$( echo "$end_time_for_all_tasks - $start_time_for_all_tasks" | bc -l )
+  	echo Time to complete all tasks=$Time_to_run_all_tasks sec
+  	echo "$Time_to_run_all_tasks" >> makespan.csv
+}
+main

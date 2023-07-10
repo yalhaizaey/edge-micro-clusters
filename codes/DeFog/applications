@@ -1,0 +1,105 @@
+#!/bin/bash
+# remove docker images and containers
+function remove_docker_images_and_containers {
+	docker stop $(docker ps -aq)
+	docker rm $(docker ps -aq)
+	docker rmi $(docker images -q)
+}
+
+#########################################################################################################################
+# remove docker containers
+function remove_docker_containers {
+	docker stop $(docker ps -aq)
+	docker rm $(docker ps -aq)
+}
+
+#########################################################################################################################
+# run and enter ipokemon container on cloud only or edge only platform
+function run_docker_ipokemon {
+	echo -n Running ipokemon docker container...
+	chmod 777 enter.sh
+	./enter.sh
+	echo -n DONE entering iPokeMon docker container
+}
+
+###################################################################################################################
+# run an application container, passing the path, application name, run script (run.sh or runEdge.sh), the application ID and the platform ID as parameters
+function run_docker_app {
+
+	# evaluate parameters #for example: "yolobuild/YOLO/docker" "YOLO" "runedge.sh" "0" "0"
+	eval path="$1"                       #"yolobuild/YOLO/docker"
+	eval applicationname="$2"            #"YOLO"
+	eval runscript="$3"                  #"runedge.sh"
+	eval currentapp="$4"                 #"0"
+	eval currentplatform="$5"            #"0"
+	eval containername="$6"               #"containername"
+
+	# navigate to the specified path
+	cd ${path}                           #cd /home/pi/defog/yolobuild/YOLO/docker
+
+	echo -n -e Running ${applicationname} container...
+	# invoke the specified run script for a fog application on the Cloud or Edge
+	#. ${runscript} ${currentapp} ${currentplatform}
+	. ${runscript} ${currentapp} ${currentplatform} ${containername}
+
+  echo -e
+	echo -n -e DONE running ${applicationname}
+	echo -e
+}
+
+#########################################################################################################################
+# utility function to print sepeartor/formatter line. This is used to format the result file and terminal output.
+function seperator {
+echo -e "*****************************************************************************" | tee -a $filename.txt
+}
+
+
+#########################################################################################################################
+# run the application script on the edge for the edge only pipeline
+function edgebench {
+	# output to the terminal and results file using tee
+	echo -e "Edge applications benchmarks:" | tee $filename.txt
+	seperator
+	test $run_yolo && run_docker_app "yolobuild/YOLO/docker" "YOLO" "runedge.sh" "0" "0" $tempContainerName
+	test $run_psphinx && run_docker_app "psphinxbuild/PocketSphinx/docker" "PocketSphinx" "runedge.sh" "1" "0" $tempContainerName
+	test $run_aeneas && run_docker_app "aeneasbuild/Aeneas/docker" "Aeneas" "runedge.sh" "2" "0" $tempContainerName
+}
+###############################################################################################################
+# applications main function (This script is executed on the Cloud or Edge)
+function main {
+	# navigate to the main defog folder on the Cloud or Edge
+	cd defog
+	echo "The processing now is running in the cloud/edge devices!!"
+	echo $tempContainerName
+	echo -e
+  test $run_edge && edgebench
+}
+
+# accept user input passed by defog bash script
+#while getopts :cebz:adfsxulhngs:yipjmk: opt; do # orignial code
+while getopts :cebz:adfsxulhngs:y:ip:j:mk: opt; do # updated code
+
+    case "$opt" in
+		e)
+			run_edge=true
+			;;
+    x)
+      run_delete=true
+			remove_docker_containers
+      ;;
+		j)
+			run_aeneas=true
+			tempContainerName=$OPTARG
+			;;
+		p)
+			run_psphinx=true
+			tempContainerName=$OPTARG
+			;;
+		y)
+      run_yolo=true
+			tempContainerName=$OPTARG
+      ;;
+    esac
+done
+shift $(( OPTIND - 1 ))
+main
